@@ -1,26 +1,73 @@
-# AI Clinical Data QC & Query Assistant
+# 🧪 AI Clinical Data QC & Query Assistant
 
-A portfolio project for statistical programming / clinical data analyst roles.
-It demonstrates natural-language querying over ADaM datasets and an
-AI-augmented QC layer that catches **derivation-logic errors** —
-the class of issues that standard CDISC compliance tools (e.g. Pinnacle 21)
-typically don't catch, because P21 checks structure and controlled
-terminology, not whether the derivation logic is internally consistent.
+**A natural-language query interface and automated QC layer for CDISC ADaM clinical trial datasets — built to catch the class of derivation-logic errors that standard compliance tools like Pinnacle 21 miss.**
 
-## Business problem this solves
 
-1. Statistical programmers spend significant time manually cross-checking
-   SDTM/ADaM datasets for derivation-logic issues that pass P21 but are
-   still wrong (e.g. a treatment end date before the start date, an
-   AVISITN that doesn't match its AVISIT label, duplicate ASEQ values).
-2. Biostatisticians and medical writers routinely have ad hoc questions
-   about the data ("how many subjects in the safety population had a
-   Grade 3+ AE after Visit 4?") that require a programmer to write fresh
-   SAS/SQL every time.
+---
 
-This project addresses both with one lightweight tool.
+## The Problem
 
-## Project structure
+Two recurring bottlenecks in clinical statistical programming:
+
+1. **Pinnacle 21 doesn't catch derivation-logic errors.** It validates CDISC structure and controlled terminology — not whether the underlying derivation logic is internally consistent. A treatment end date before the start date, a visit number that doesn't match its label, a duplicate sequence ID: all structurally valid, all still wrong, all typically caught manually (if caught at all).
+2. **Ad hoc data questions bottleneck on programmer time.** Biostatisticians and medical writers need quick answers — *"how many subjects in the safety population had a Grade 3+ AE after Visit 4?"* — that otherwise require a programmer to write fresh SQL/SAS every time.
+
+## What This Does
+
+| Tab | What it does | Requires API key? |
+|---|---|---|
+| **✅ Data QC Dashboard** | Runs 7 rule-based checks against ADSL/ADAE for derivation-logic errors, with severity levels and flagged records | No — pure pandas |
+| **💬 Ask a Question** | Translates a plain-English question into a pandas query, runs it, and returns a plain-English summary | Yes — free Gemini key |
+
+## Example Queries
+
+```
+Which subjects discontinued due to an adverse event, and what was their treatment arm?
+How many subjects in the safety population had a Grade 3+ AE after Visit 4?
+Compare the number of serious adverse events across the three treatment arms.
+What percentage of adverse events were considered related to treatment?
+```
+
+## The QC Checks
+
+| ID | Check | Why P21 misses it |
+|---|---|---|
+| ADSL-01 | TRTEDT before TRTSDT | Structurally valid dates, just logically wrong order |
+| ADSL-02 | SAFFL='Y' but TRTSDT missing | Cross-field consistency, not a CT/format rule |
+| ADAE-01 | AVISITN doesn't match AVISIT label | Requires study-specific visit-map knowledge |
+| ADAE-02 | Missing ASEQ | Breaks downstream TLF joins, not CDISC-invalid on its own |
+| ADAE-03 | Duplicate ASEQ within subject | Uniqueness logic, not controlled terminology |
+| ADAE-04 | AE start date after AE end date | Same class as ADSL-01 |
+| ADAE-05 | ADAE USUBJID not in ADSL | Referential integrity across datasets |
+
+Each check returns a `QCResult` (ID, description, severity, flagged records) — a single object the dashboard, a report generator, or an LLM summary layer can all consume.
+
+## How the Natural-Language Layer Works
+
+```
+User question (plain English)
+        │
+        ▼
+Gemini + ADSL/ADAE schema description
+        │
+        ▼
+Single pandas expression (code only, no explanation)
+        │
+        ▼
+Executed in a RESTRICTED namespace
+(only adsl, adae, pd exposed — no builtins, no file/network access)
+        │
+        ▼
+Result sent back to Gemini → plain-English summary
+```
+
+The restricted execution namespace is the safety boundary that matters here: a model-generated expression can query the two dataframes and nothing else — no file access, no imports, no network calls — regardless of what the generated code tries to do.
+
+## Tech Stack
+
+Python · pandas · Streamlit · Google Gemini API (free tier) · restricted code execution
+
+## Project Structure
 
 ```
 clinical-ai-assistant/
@@ -46,63 +93,27 @@ python data/generate_synthetic_adam.py
 # run the QC checks standalone
 python qc/qc_checks.py
 
-# run the full app (needs a free Gemini API key for the NL tab)
-export GEMINI_API_KEY=...
+# run the full app
+export GEMINI_API_KEY=...     
 streamlit run app.py
 ```
 
-The QC dashboard tab works with **no API key** — it's pure pandas rule
-logic. The natural-language query tab requires `GEMINI_API_KEY`, which
-you can get for free (no credit card) at https://aistudio.google.com/apikey.
-The free tier covers ~1,500 requests/day on Gemini Flash models, more
-than enough for demoing this project.
+The QC dashboard works immediately with no key. The NL query tab needs a free Gemini API key (no credit card, ~1,500 requests/day) from [Google AI Studio](https://aistudio.google.com/apikey).
 
-## How the natural-language layer works
+## Data Note
 
-1. The user's question + a description of the ADSL/ADAE schema is sent to
-   Gemini, which returns a single pandas expression (no explanation).
-2. That expression is executed in a **restricted namespace** — only
-   `adsl`, `adae`, and `pd` are exposed, and builtins are stripped. This
-   is the safety boundary that keeps a model-generated expression from
-   doing anything beyond querying the two dataframes.
-3. The result is sent back to Gemini with a second prompt asking for a
-   short, plain-English summary aimed at a non-technical audience
-   (biostatisticians / medical writers), not a programmer.
+All data is **synthetic**, generated with `data/generate_synthetic_adam.py` to mimic CDISC ADaM structure and naming conventions. No real patient data is used anywhere in this project. A handful of derivation errors are intentionally injected into the generated data so the QC layer has real issues to catch.
 
-## The QC checks (qc/qc_checks.py)
-
-| ID | Check | Why P21 misses it |
-|---|---|---|
-| ADSL-01 | TRTEDT before TRTSDT | Structurally valid dates, just logically wrong order |
-| ADSL-02 | SAFFL='Y' but TRTSDT missing | Cross-field consistency, not a CT/format rule |
-| ADAE-01 | AVISITN doesn't match AVISIT label | Requires study-specific visit-map knowledge |
-| ADAE-02 | Missing ASEQ | Only breaks downstream TLF joins, not CDISC-invalid on its own |
-| ADAE-03 | Duplicate ASEQ within subject | Uniqueness logic, not controlled terminology |
-| ADAE-04 | AE start date after AE end date | Same class as ADSL-01 |
-| ADAE-05 | ADAE USUBJID not in ADSL | Referential integrity across datasets |
-
-Each function returns a `QCResult` (check ID, description, severity,
-flagged records) so the dashboard, a report generator, or an LLM summary
-layer can all consume the same object.
-
-## Extending this project
+## Extending This Project
 
 - Add ADLB/ADVS and build lab-shift-table or vital-signs-specific QC rules
-- Swap the rule-based QC layer for an LLM-assisted anomaly review: feed
-  it a sample of derivation code + the flagged rows and ask it to suggest
-  root causes
-- Add a "query history" log so repeated ad hoc questions from
-  biostatisticians reveal which derivations are consistently confusing
-- Wire in real SQL generation (SQLite) for teams that want an actual
-  query string instead of a pandas expression
+- Swap the rule-based QC layer for LLM-assisted anomaly review — feed it flagged rows and ask for likely root causes
+- Add a query-history log to surface which derivations biostatisticians ask about most
+- Wire in real SQL generation for teams that want an actual query string, not a pandas expression
 
-## Talking points for interviews
+## Background
 
-- "Pinnacle 21 validates CDISC compliance rules — I built a layer for the
-  derivation-logic issues that sit outside what P21 checks."
-- "The safety boundary in the NL layer is the restricted eval namespace —
-  I don't let a model-generated expression touch anything except the two
-  dataframes."
-- "I generated synthetic data with intentionally injected errors so the
-  QC layer has something real to catch — this mirrors how you'd validate
-  a QC tool before trusting it on real study data."
+Built during my MSc in Applied Statistics and Analytics, informed by hands-on SDTM/ADaM development and Pinnacle 21 validation work during my statistical programming internship at Eli Lilly. This isn't a hypothetical business case — the QC checks reflect derivation-logic issues that come up in that pipeline.
+
+---
+
